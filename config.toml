@@ -1,0 +1,9 @@
+[[sni]]
+name = "shadowsocks-rust"
+inbound = ["www.bing.com","bing.com"]
+outbound = "shadowsocks-rust:443"
+
+[[sni]]
+name = "caddy"
+default = true
+outbound = "127.0.0.1:443"
