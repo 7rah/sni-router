@@ -13,3 +13,10 @@ serde = "^1"
 serde_derive = "^1"
 tls-parser = "^0.10.0"
 anyhow = "^1"
+
+[profile.release]
+incremental = true
+debug = 0 # Set this to 1 or 2 to get more useful backtraces in debugger.
+lto = "fat"
+codegen-units = 1
+panic = "abort"
