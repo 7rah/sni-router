@@ -82,11 +82,14 @@ async fn main() -> ! {
     loop {
         let db = db.clone();
         match listener.accept().await {
-            Ok((inbound, _)) => {
-                spawn(async {
+            Ok((inbound, addr)) => {
+                spawn(async move {
                     match serve(db, inbound).await {
                         Ok(_) => {}
-                        Err(e) => println!("Error: {}", e),
+                        Err(e) => {
+                            println!("from {}", addr);
+                            println!("Error: {}", e)
+                        }
                     }
                 });
             }
