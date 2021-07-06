@@ -87,8 +87,8 @@ async fn main() -> ! {
                     match serve(db, inbound).await {
                         Ok(_) => {}
                         Err(e) => {
-                            println!("from {}", addr);
-                            println!("Error: {}", e)
+                            println!("Error: {}", e);
+                            println!("From {}",addr)
                         }
                     }
                 });
@@ -104,7 +104,7 @@ async fn serve(db: Arc<Db>, inbound: TcpStream) -> Result<()> {
     let domain = parse_sni(buf)?;
     let result = db.find(&domain);
     if let Some(target) = result {
-        println!("redirect domain request:{} to backend:{}", domain, target);
+        println!("redirect domain request: {} to backend: {}", domain, target);
         let outbound = TcpStream::connect(target).await?;
 
         let (mut ri, mut wi) = split(inbound);
