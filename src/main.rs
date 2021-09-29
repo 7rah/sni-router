@@ -85,8 +85,8 @@ async fn main() -> ! {
             Ok((inbound, addr)) => {
                 spawn(async move {
                     match serve(db, inbound).await {
-                        Ok(_) => {}
-                        Err(e) => println!("Error: {} {}", addr, e);
+                        Ok(_) => {},
+                        Err(e) => println!("Error: {} {}", addr, e),
                     }
                 });
             }
