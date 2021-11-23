@@ -1,9 +1,11 @@
 use anyhow::anyhow;
 use anyhow::Result;
+use regex::Regex;
 use serde_derive::Deserialize;
 use std::str;
 use std::sync::Arc;
-use std::{collections::HashMap, env, fs::File, io::Read};
+use std::vec;
+use std::{env, fs::File, io::Read};
 use tls_parser::{
     parse_tls_extensions, parse_tls_plaintext, TlsExtension, TlsMessage::Handshake,
     TlsMessageHandshake::ClientHello,
@@ -29,37 +31,40 @@ struct Sni {
 }
 
 struct Db {
-    map: HashMap<String, String>,
+    list: Vec<(Vec<Regex>, String)>,
     default: Option<String>,
 }
 
 impl Db {
     fn init_from_config(config: Config) -> Self {
-        let mut map: HashMap<String, String> = HashMap::new();
+        let mut list = vec![];
         let mut default = None;
-
         for sni in config.sni {
             if sni.default == None {
-                for i in sni.inbound.unwrap() {
-                    map.insert(i, sni.outbound.clone());
+                let mut v = vec![];
+                for domain in sni.inbound.unwrap() {
+                    v.push(Regex::new(&domain).unwrap());
                 }
-            }
-            if sni.default == Some(true) {
+                list.push((v, sni.outbound));
+            } else {
                 default = Some(sni.outbound);
             }
         }
-
-        Db { map, default }
+        Db { list, default }
     }
 
-    fn find(&self, domain: &str) -> Option<&str> {
-        let k = self.map.get(domain);
-        if let Some(target) = k {
-            Some(target)
-        } else if let Some(target) = &self.default {
-            Some(target)
+    fn find(&self, domain: &str) -> Option<&String> {
+        for (list, outbound) in &self.list {
+            for re in list {
+                if re.is_match(domain) {
+                    return Some(outbound);
+                }
+            }
+        }
+        if let Some(outbound) = &self.default {
+            Some(outbound)
         } else {
-            None
+            return None;
         }
     }
 }
@@ -85,7 +90,7 @@ async fn main() -> ! {
             Ok((inbound, addr)) => {
                 spawn(async move {
                     match serve(db, inbound).await {
-                        Ok(_) => {},
+                        Ok(_) => {}
                         Err(e) => println!("Error: {} {}", addr, e),
                     }
                 });

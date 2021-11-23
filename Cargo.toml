@@ -11,8 +11,9 @@ tokio = {version = "^1.7.1",features = ["full"]}
 toml = "^0.5.8"
 serde = "^1"
 serde_derive = "^1"
-tls-parser = "^0.10.0"
+tls-parser = "0.11.0"
 anyhow = "^1"
+regex = "^1.5.4"
 
 [profile.release]
 incremental = true

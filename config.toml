@@ -1,6 +1,6 @@
 [[sni]]
 name = "shadowsocks-rust"
-inbound = ["www.bing.com","bing.com"]
+inbound = ["/*.bing.com","bing.com"]
 outbound = "shadowsocks-rust:443"
 
 [[sni]]
