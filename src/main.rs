@@ -82,7 +82,7 @@ async fn main() -> ! {
 
     let db = Db::init_from_config(config);
     let db = Arc::new(db);
-    let listener = TcpListener::bind("0.0.0.0:443").await.unwrap();
+    let listener = TcpListener::bind("[::]:443").await.unwrap();
 
     loop {
         let db = db.clone();
@@ -90,9 +90,7 @@ async fn main() -> ! {
             Ok((inbound, addr)) => {
                 spawn(async move {
                     match serve(db, inbound).await {
-                        Ok(_) => {
-                            println!("{}",addr);
-                        }
+                        Ok(_) => (),
                         Err(e) => println!("Error: {} {}", addr, e),
                     }
                 });
@@ -108,7 +106,7 @@ async fn serve(db: Arc<Db>, inbound: TcpStream) -> Result<()> {
     let domain = parse_sni(buf).unwrap_or(String::new());
     let result = db.find(&domain);
     if let Some(target) = result {
-        println!("{} -> {}", domain, target);
+        println!("{} -> {} -> {}",inbound.peer_addr()?, domain, target);
         let outbound = TcpStream::connect(target).await?;
 
         let (mut ri, mut wi) = split(inbound);
