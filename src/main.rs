@@ -2,6 +2,8 @@ use anyhow::anyhow;
 use anyhow::Result;
 use regex::Regex;
 use serde_derive::Deserialize;
+use simplelog::*;
+use simplelog::{error, info, warn};
 use std::str;
 use std::sync::Arc;
 use std::vec;
@@ -70,8 +72,16 @@ impl Db {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ! {
+    TermLogger::init(
+        LevelFilter::Info,
+        ConfigBuilder::new().set_time_to_local(true).build(),
+        TerminalMode::Stdout,
+        ColorChoice::Auto,
+    ).unwrap();
+    
+
     let arg = env::args().nth(1).unwrap_or_else(|| {
-        println!("need config file path,use default(./config.toml)");
+        warn!("need config file path,use default(./config.toml)");
         "config.toml".to_string()
     });
     let mut file = File::open(arg).unwrap();
@@ -90,11 +100,11 @@ async fn main() -> ! {
                 spawn(async move {
                     match serve(db, inbound).await {
                         Ok(_) => (),
-                        Err(e) => println!("Error: {} {}", addr, e),
+                        Err(e) => warn!("{} {}", addr, e),
                     }
                 });
             }
-            Err(e) => println!("Error: {}", e),
+            Err(e) => error!("{}", e),
         }
     }
 }
@@ -105,20 +115,19 @@ async fn serve(db: Arc<Db>, inbound: TcpStream) -> Result<()> {
     let domain = parse_sni(buf).unwrap_or(String::new());
     let result = db.find(&domain);
     if let Some(target) = result {
-        println!("{} -> {} -> {}",inbound.peer_addr()?, domain, target);
+        info!("{} -> {} -> {}", inbound.peer_addr()?, domain, target);
         let outbound = TcpStream::connect(target).await?;
 
         let (mut ri, mut wi) = split(inbound);
         let (mut ro, mut wo) = split(outbound);
-        
+
         let e = tokio::select! {
             e = copy(&mut ri, &mut wo) => {e}
             e = copy(&mut ro, &mut wi) => {e}
         };
         e?;
-
     } else {
-        println!("unable to match domain: {}", domain);
+        error!("unable to match domain: {}", domain);
     }
 
     Ok(())
@@ -150,10 +159,7 @@ fn parse_sni(buf: &[u8]) -> Result<String> {
     }
 }
 
-async fn copy<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
-    r: &mut R,
-    w: &mut W,
-) -> Result<()> {
+async fn copy<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(r: &mut R, w: &mut W) -> Result<()> {
     let mut buf = [0u8; 16384];
     loop {
         let len = r.read(&mut buf).await?;

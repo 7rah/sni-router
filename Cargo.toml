@@ -14,6 +14,9 @@ serde_derive = "^1"
 tls-parser = "0.11.0"
 anyhow = "^1"
 regex = "^1.5.4"
+simplelog = { version = "^0.11.0", features = ["paris"] }
+log = "^0.4.14"
+chrono-tz = "^0.6.0"
 
 [profile.release]
 lto = "fat"
