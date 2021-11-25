@@ -65,7 +65,7 @@ impl Db {
         if let Some(outbound) = &self.default {
             Some(outbound)
         } else {
-            return None;
+            None
         }
     }
 }
@@ -77,8 +77,8 @@ async fn main() -> ! {
         ConfigBuilder::new().set_time_to_local(true).build(),
         TerminalMode::Stdout,
         ColorChoice::Auto,
-    ).unwrap();
-    
+    )
+    .unwrap();
 
     let arg = env::args().nth(1).unwrap_or_else(|| {
         warn!("need config file path,use default(./config.toml)");
@@ -112,7 +112,7 @@ async fn main() -> ! {
 async fn serve(db: Arc<Db>, inbound: TcpStream) -> Result<()> {
     let buf = &mut [0u8; 2048];
     inbound.peek(buf).await?;
-    let domain = parse_sni(buf).unwrap_or(String::new());
+    let domain = parse_sni(buf).unwrap_or_default();
     let result = db.find(&domain);
     if let Some(target) = result {
         info!("{} -> {} -> {}", inbound.peer_addr()?, domain, target);
@@ -126,6 +126,8 @@ async fn serve(db: Arc<Db>, inbound: TcpStream) -> Result<()> {
             e = copy(&mut ro, &mut wi) => {e}
         };
         e?;
+        ri.unsplit(wi).shutdown().await?;
+        ro.unsplit(wo).shutdown().await?;
     } else {
         error!("unable to match domain: {}", domain);
     }
@@ -134,7 +136,7 @@ async fn serve(db: Arc<Db>, inbound: TcpStream) -> Result<()> {
 }
 
 fn parse_sni(buf: &[u8]) -> Result<String> {
-    let (_, res) = parse_tls_plaintext(&buf).map_err(|_| anyhow!("unexpected protocol"))?;
+    let (_, res) = parse_tls_plaintext(buf).map_err(|_| anyhow!("unexpected protocol"))?;
     match &res.msg[0] {
         Handshake(ClientHello(contents)) => {
             let ext = contents
