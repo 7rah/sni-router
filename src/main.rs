@@ -106,7 +106,7 @@ async fn serve(db: Arc<Db>, inbound: TcpStream) -> Result<()> {
     let domain = parse_sni(buf).unwrap_or(String::new());
     let result = db.find(&domain);
     if let Some(target) = result {
-        println!("{} -> {} -> {}",inbound.peer_addr()?, domain, target);
+        println!("{} -> {} -> {}",inbound.local_addr()?, domain, target);
         let outbound = TcpStream::connect(target).await?;
 
         let (mut ri, mut wi) = split(inbound);
