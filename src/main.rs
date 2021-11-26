@@ -90,7 +90,7 @@ async fn main() -> ! {
 
     let db = Db::init_from_config(config);
     let db = Arc::new(db);
-    let listener = TcpListener::bind("0.0.0.0:443").await.unwrap();
+    let listener = TcpListener::bind("[::]:443").await.unwrap();
 
     loop {
         let db = db.clone();
