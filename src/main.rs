@@ -13,6 +13,7 @@ use tls_parser::{
     TlsMessageHandshake::ClientHello,
 };
 use tokio::io::split;
+use tokio::io::copy_bidirectional;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
@@ -109,25 +110,15 @@ async fn main() -> ! {
     }
 }
 
-async fn serve(db: Arc<Db>, inbound: TcpStream) -> Result<()> {
+async fn serve(db: Arc<Db>, mut inbound: TcpStream) -> Result<()> {
     let buf = &mut [0u8; 2048];
     inbound.peek(buf).await?;
     let domain = parse_sni(buf).unwrap_or_default();
     let result = db.find(&domain);
     if let Some(target) = result {
         info!("{} -> {} -> {}", inbound.peer_addr()?, domain, target);
-        let outbound = TcpStream::connect(target).await?;
-
-        let (mut ri, mut wi) = split(inbound);
-        let (mut ro, mut wo) = split(outbound);
-
-        let e = tokio::select! {
-            e = copy(&mut ri, &mut wo) => {e}
-            e = copy(&mut ro, &mut wi) => {e}
-        };
-        e?;
-        ri.unsplit(wi).shutdown().await?;
-        ro.unsplit(wo).shutdown().await?;
+        let mut outbound = TcpStream::connect(target).await?;
+        copy_bidirectional(&mut inbound, &mut outbound).await?;
     } else {
         error!("unable to match domain: {}", domain);
     }
@@ -159,17 +150,4 @@ fn parse_sni(buf: &[u8]) -> Result<String> {
         }
         _ => Err(anyhow!("unexpected handshake type")),
     }
-}
-
-async fn copy<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(r: &mut R, w: &mut W) -> Result<()> {
-    let mut buf = [0u8; 16384];
-    loop {
-        let len = r.read(&mut buf).await?;
-        if len == 0 {
-            break;
-        }
-        w.write(&buf[..len]).await?;
-        w.flush().await?;
-    }
-    Ok(())
 }
