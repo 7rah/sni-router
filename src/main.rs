@@ -12,9 +12,7 @@ use tls_parser::{
     parse_tls_extensions, parse_tls_plaintext, TlsExtension, TlsMessage::Handshake,
     TlsMessageHandshake::ClientHello,
 };
-use tokio::io::split;
 use tokio::io::copy_bidirectional;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::spawn;
@@ -118,11 +116,11 @@ async fn serve(db: Arc<Db>, mut inbound: TcpStream) -> Result<()> {
     if let Some(target) = result {
         info!("{} -> {} -> {}", inbound.peer_addr()?, domain, target);
         let mut outbound = TcpStream::connect(target).await?;
-        copy_bidirectional(&mut inbound, &mut outbound).await?;
-    } else {
-        error!("unable to match domain: {}", domain);
+        debug!(
+            "{:?}",
+            copy_bidirectional(&mut inbound, &mut outbound).await
+        );
     }
-
     Ok(())
 }
 
