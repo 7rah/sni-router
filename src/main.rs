@@ -6,6 +6,7 @@ use regex::Regex;
 use serde_derive::Deserialize;
 use simplelog::*;
 use simplelog::{error, info, warn};
+use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str;
 use std::sync::Arc;
@@ -113,8 +114,12 @@ async fn main() -> ! {
 
     let db = Db::init_from_config(config).await;
     let db = Arc::new(db);
-    let dns = DNSClient::new(vec!["1.1.1.1:53".parse().unwrap()]);
+    
+    //string to ipaddr
+    let p = |s:&str| {s.parse().unwrap()};
+    let dns = DNSClient::new(vec![p("1.1.1.1:53"),p("8.8.8.8:53"),p("114.114.114.114:53")]);
     let dns = Arc::new(dns);
+
     let listener = TcpListener::bind("[::]:443").await.unwrap();
 
     loop {
@@ -134,6 +139,16 @@ async fn main() -> ! {
     }
 }
 
+fn mapped_addr_to_ipv4_addr(addr: SocketAddr) -> SocketAddr {
+    let mut rawaddr = addr;
+    if let IpAddr::V6(addr) = rawaddr.ip() {
+        if let Some(addr) = addr.to_ipv4() {
+            rawaddr.set_ip(addr.into());
+        }
+    }
+    rawaddr
+}
+
 async fn serve(db: Arc<Db>, dns: Arc<DNSClient>, mut inbound: TcpStream) -> Result<()> {
     let buf = &mut [0u8; 2048];
     inbound.peek(buf).await?;
@@ -141,21 +156,17 @@ async fn serve(db: Arc<Db>, dns: Arc<DNSClient>, mut inbound: TcpStream) -> Resu
     let result = db.cached_find(&domain).await;
     if let Some(outbound_config) = result {
         let mut outbound = TcpStream::connect(outbound_config.socketaddr).await?;
-        let peer_addr = inbound.peer_addr()?;
-        let local_addr = inbound.local_addr()?;
+        let peer_addr = mapped_addr_to_ipv4_addr(inbound.peer_addr()?);
+        let local_addr = mapped_addr_to_ipv4_addr(inbound.local_addr()?);
 
         spawn(async move { copy_bidirectional(&mut inbound, &mut outbound).await });
 
-        let site = dns.query_ptr(peer_addr.ip()).await.map_or(String::from(""), |s| format!(".{s}"));
-        info!(
-            "MATCH {} [{}]{}:{} -> {} -> {}",
-            outbound_config.name,
-            peer_addr.ip(),
-            site,
-            peer_addr.port(),
-            domain,
-            local_addr
-        );
+        let name = &outbound_config.name;
+        let site = dns
+            .query_ptr(peer_addr.ip())
+            .await
+            .map_or(String::from(""), |s| " ".to_string() + &s);
+        info!("MATCH {name} {peer_addr}{site} -> {domain} -> {local_addr}");
     }
     Ok(())
 }
