@@ -1,18 +1,21 @@
 use anyhow::anyhow;
 use anyhow::Result;
+use dnsclientx::DNSClient;
+use moka::future::Cache;
 use regex::Regex;
 use serde_derive::Deserialize;
 use simplelog::*;
 use simplelog::{error, info, warn};
+use std::net::SocketAddr;
 use std::str;
 use std::sync::Arc;
-use std::vec;
 use std::{env, fs::File, io::Read};
 use tls_parser::{
     parse_tls_extensions, parse_tls_plaintext, TlsExtension, TlsMessage::Handshake,
     TlsMessageHandshake::ClientHello,
 };
 use tokio::io::copy_bidirectional;
+use tokio::net::lookup_host;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::spawn;
@@ -24,48 +27,68 @@ struct Config {
 
 #[derive(Debug, Deserialize)]
 struct Sni {
-    default: Option<bool>,
     name: String,
-    inbound: Option<Vec<String>>,
+    inbound: Vec<String>,
     outbound: String,
 }
 
+#[derive(Debug)]
+struct Outbound {
+    name: String,
+    socketaddr: SocketAddr,
+}
+
 struct Db {
-    list: Vec<(Vec<Regex>, String)>,
-    default: Option<String>,
+    rule_sets: Vec<(Regex, usize)>,
+    cache: Cache<String, usize>,
+    outbounds: Vec<Outbound>,
 }
 
 impl Db {
-    fn init_from_config(config: Config) -> Self {
-        let mut list = vec![];
-        let mut default = None;
-        for sni in config.sni {
-            if sni.default == None {
-                let mut v = vec![];
-                for domain in sni.inbound.unwrap() {
-                    v.push(Regex::new(&domain).unwrap());
-                }
-                list.push((v, sni.outbound));
-            } else {
-                default = Some(sni.outbound);
+    async fn init_from_config(config: Config) -> Self {
+        let mut outbounds = Vec::new();
+        let mut rule_sets = Vec::new();
+        for (i, sni) in config.sni.into_iter().enumerate() {
+            let socketaddr = lookup_host(sni.outbound).await.unwrap().next().unwrap();
+            outbounds.push(Outbound {
+                name: sni.name,
+                socketaddr,
+            });
+
+            for rule in sni.inbound {
+                rule_sets.push((Regex::new(&rule).unwrap(), i));
             }
         }
-        Db { list, default }
+
+        let cache = Cache::new(512);
+        Db {
+            rule_sets,
+            outbounds,
+            cache,
+        }
     }
 
-    fn find(&self, domain: &str) -> Option<&String> {
-        for (list, outbound) in &self.list {
-            for re in list {
-                if re.is_match(domain) {
-                    return Some(outbound);
-                }
+    async fn cached_find(&self, domain: &str) -> Option<&Outbound> {
+        if let Some(i) = self.cache.get(&domain.to_string()) {
+            debug!("hit cache {}:{:?}", domain, self.outbounds[i]);
+            return Some(&self.outbounds[i]);
+        } else {
+            debug!("miss cache {}", domain);
+            if let Some(i) = self.find(domain) {
+                self.cache.insert(domain.to_string(), i).await;
+                return Some(&self.outbounds[i]);
             }
         }
-        if let Some(outbound) = &self.default {
-            Some(outbound)
-        } else {
-            None
+        None
+    }
+
+    fn find(&self, domain: &str) -> Option<usize> {
+        for (re, i) in &self.rule_sets {
+            if re.is_match(domain) {
+                return Some(*i);
+            }
         }
+        None
     }
 }
 
@@ -88,16 +111,19 @@ async fn main() -> ! {
     file.read_to_string(&mut toml_str).unwrap();
     let config: Config = toml::from_str(&toml_str).unwrap();
 
-    let db = Db::init_from_config(config);
+    let db = Db::init_from_config(config).await;
     let db = Arc::new(db);
+    let dns = DNSClient::new(vec!["1.1.1.1:53".parse().unwrap()]);
+    let dns = Arc::new(dns);
     let listener = TcpListener::bind("[::]:443").await.unwrap();
 
     loop {
         let db = db.clone();
+        let dns = dns.clone();
         match listener.accept().await {
             Ok((inbound, addr)) => {
                 spawn(async move {
-                    match serve(db, inbound).await {
+                    match serve(db, dns, inbound).await {
                         Ok(_) => (),
                         Err(e) => warn!("{} {}", addr, e),
                     }
@@ -108,17 +134,27 @@ async fn main() -> ! {
     }
 }
 
-async fn serve(db: Arc<Db>, mut inbound: TcpStream) -> Result<()> {
+async fn serve(db: Arc<Db>, dns: Arc<DNSClient>, mut inbound: TcpStream) -> Result<()> {
     let buf = &mut [0u8; 2048];
     inbound.peek(buf).await?;
     let domain = parse_sni(buf).unwrap_or_default();
-    let result = db.find(&domain);
-    if let Some(target) = result {
-        info!("{} -> {} -> {}", inbound.peer_addr()?, domain, target);
-        let mut outbound = TcpStream::connect(target).await?;
-        debug!(
-            "{:?}",
-            copy_bidirectional(&mut inbound, &mut outbound).await
+    let result = db.cached_find(&domain).await;
+    if let Some(outbound_config) = result {
+        let mut outbound = TcpStream::connect(outbound_config.socketaddr).await?;
+        let peer_addr = inbound.peer_addr()?;
+        let local_addr = inbound.local_addr()?;
+
+        spawn(async move { copy_bidirectional(&mut inbound, &mut outbound).await });
+
+        let site = dns.query_ptr(peer_addr.ip()).await.map_or(String::from(""), |s| format!(".{s}"));
+        info!(
+            "MATCH {} [{}]{}:{} -> {} -> {}",
+            outbound_config.name,
+            peer_addr.ip(),
+            site,
+            peer_addr.port(),
+            domain,
+            local_addr
         );
     }
     Ok(())
