@@ -8,16 +8,19 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["rt", "net", "macros", "io-util"] }
-toml = "^0.5.8"
-serde = "^1"
-serde_derive = "^1"
+toml = "0.5"
+serde = "1"
+serde_derive = "1"
 tls-parser = "0.11.0"
-anyhow = "^1"
-regex = "^1.5.4"
-simplelog = { version = "^0.11.0", features = ["paris"] }
-log = "^0.4.14"
-moka = { version = "^0.7", features = ["future"] }
-dnsclientx = {version = "^0.4.0",features = ['tokio-async']}
+anyhow = "1"
+regex = "1"
+simplelog = { version = "0.11", features = ["paris"] }
+log = "0.4"
+moka = { version = "0.7", features = ["future"] }
+dnsclientx = {version = "0.4.0",features = ['tokio-async']}
+qqwry = {git = "https://github.com/sybblow/rust-qqwry.git"}
+lazy_static = "1"
+ipdb = "0.1"
 
 [profile.release]
 lto = "fat"

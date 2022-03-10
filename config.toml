@@ -8,3 +8,8 @@ outbound = "shadowsocks:443"
 name = "caddy"
 inbound = ["/*"]
 outbound = "caddy:443"
+
+[global]
+qqwry = "czipdata.dat"
+ipdb_v6 = "ipv6wry.db"
+ipdb_v4 = "czipdata.dat"

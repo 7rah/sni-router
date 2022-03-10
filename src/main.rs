@@ -1,29 +1,27 @@
-use anyhow::anyhow;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use dnsclientx::DNSClient;
+use ipdb::Reader;
 use moka::future::Cache;
+use qqwry::QQWryData;
 use regex::Regex;
 use serde_derive::Deserialize;
-use simplelog::*;
-use simplelog::{error, info, warn};
-use std::net::IpAddr;
-use std::net::SocketAddr;
+use simplelog::{error, info, warn, *};
+use std::fs::File;
+use std::io::Read;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::str;
 use std::sync::Arc;
-use std::{env, fs::File, io::Read};
-use tls_parser::{
-    parse_tls_extensions, parse_tls_plaintext, TlsExtension, TlsMessage::Handshake,
-    TlsMessageHandshake::ClientHello,
-};
-use tokio::io::copy_bidirectional;
-use tokio::net::lookup_host;
-use tokio::net::TcpListener;
-use tokio::net::TcpStream;
-use tokio::spawn;
+use tls_parser::TlsMessage::Handshake;
+use tls_parser::TlsMessageHandshake::ClientHello;
+use tls_parser::{parse_tls_extensions, parse_tls_plaintext, TlsExtension};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::{select, spawn};
 
 #[derive(Debug, Deserialize)]
 struct Config {
     sni: Vec<Sni>,
+    global: Global,
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,6 +29,12 @@ struct Sni {
     name: String,
     inbound: Vec<String>,
     outbound: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Global {
+    qqwry: String,
+    ipdb_v6: String,
 }
 
 #[derive(Debug)]
@@ -46,11 +50,11 @@ struct Db {
 }
 
 impl Db {
-    async fn init_from_config(config: Config) -> Self {
+    fn init_from_config(config: Config) -> Self {
         let mut outbounds = Vec::new();
         let mut rule_sets = Vec::new();
         for (i, sni) in config.sni.into_iter().enumerate() {
-            let socketaddr = lookup_host(sni.outbound).await.unwrap().next().unwrap();
+            let socketaddr = sni.outbound.to_socket_addrs().unwrap().next().unwrap();
             outbounds.push(Outbound {
                 name: sni.name,
                 socketaddr,
@@ -93,42 +97,57 @@ impl Db {
     }
 }
 
+fn init_config() -> Config {
+    let arg = "config.toml";
+    let mut file = File::open(arg).unwrap();
+    let mut toml_str = String::new();
+    file.read_to_string(&mut toml_str).unwrap();
+    let config: Config = toml::from_str(&toml_str).unwrap();
+    config
+}
+
+lazy_static::lazy_static! {
+    static ref DB:Arc<Db> = Arc::new(Db::init_from_config(init_config()));
+    static ref DNS:Arc<DNSClient> = {
+        let p = |s: &str| s.parse().unwrap();
+        let dns = DNSClient::new(vec![
+            p("1.1.1.1:53"),
+            p("8.8.8.8:53"),
+            p("114.114.114.114:53"),
+        ]);
+        Arc::new(dns)
+    };
+    static ref QQWRY:Arc<QQWryData> = {
+        let config = init_config();
+        let wry = QQWryData::new(config.global.qqwry).unwrap();
+        Arc::new(wry)
+    };
+    static ref IPDB_V6:Reader = {
+        let config = init_config();
+        Reader::open_file(config.global.ipdb_v6).unwrap()
+    };
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ! {
     TermLogger::init(
         LevelFilter::Info,
-        ConfigBuilder::new().set_time_to_local(true).build(),
+        ConfigBuilder::new()
+            .set_time_to_local(true)
+            .set_time_format_str("%FT%T%.3f")
+            .build(),
         TerminalMode::Stdout,
         ColorChoice::Auto,
     )
     .unwrap();
 
-    let arg = env::args().nth(1).unwrap_or_else(|| {
-        warn!("need config file path,use default(./config.toml)");
-        "config.toml".to_string()
-    });
-    let mut file = File::open(arg).unwrap();
-    let mut toml_str = String::new();
-    file.read_to_string(&mut toml_str).unwrap();
-    let config: Config = toml::from_str(&toml_str).unwrap();
-
-    let db = Db::init_from_config(config).await;
-    let db = Arc::new(db);
-    
-    //string to ipaddr
-    let p = |s:&str| {s.parse().unwrap()};
-    let dns = DNSClient::new(vec![p("1.1.1.1:53"),p("8.8.8.8:53"),p("114.114.114.114:53")]);
-    let dns = Arc::new(dns);
-
     let listener = TcpListener::bind("[::]:443").await.unwrap();
 
     loop {
-        let db = db.clone();
-        let dns = dns.clone();
         match listener.accept().await {
             Ok((inbound, addr)) => {
                 spawn(async move {
-                    match serve(db, dns, inbound).await {
+                    match serve(inbound).await {
                         Ok(_) => (),
                         Err(e) => warn!("{} {}", addr, e),
                     }
@@ -149,24 +168,41 @@ fn mapped_addr_to_ipv4_addr(addr: SocketAddr) -> SocketAddr {
     rawaddr
 }
 
-async fn serve(db: Arc<Db>, dns: Arc<DNSClient>, mut inbound: TcpStream) -> Result<()> {
+async fn serve(mut inbound: TcpStream) -> Result<()> {
     let buf = &mut [0u8; 2048];
     inbound.peek(buf).await?;
     let domain = parse_sni(buf).unwrap_or_default();
-    let result = db.cached_find(&domain).await;
+    let result = DB.cached_find(&domain).await;
     if let Some(outbound_config) = result {
         let mut outbound = TcpStream::connect(outbound_config.socketaddr).await?;
         let peer_addr = mapped_addr_to_ipv4_addr(inbound.peer_addr()?);
         let local_addr = mapped_addr_to_ipv4_addr(inbound.local_addr()?);
 
-        spawn(async move { copy_bidirectional(&mut inbound, &mut outbound).await });
+        spawn(async move { copy_tcp(&mut inbound, &mut outbound).await });
 
         let name = &outbound_config.name;
-        let site = dns
+        let site = DNS
             .query_ptr(peer_addr.ip())
             .await
             .map_or(String::from(""), |s| " ".to_string() + &s);
-        info!("MATCH {name} {peer_addr}{site} -> {domain} -> {local_addr}");
+
+        let geo = match peer_addr.ip() {
+            IpAddr::V4(v4) => QQWRY
+                .query(v4)
+                .map_or("".to_string(), |g| format!("{} {}", g.area, g.country)),
+            IpAddr::V6(v6) => IPDB_V6
+                .find(&v6.to_string(), "CN")
+                .map_or("".to_string(), |v| format!("{} {} {}", v[0], v[1], v[2])),
+        };
+
+        match (geo.as_str(), domain.as_str()) {
+            ("", "") => info!("MATCH {name}  {peer_addr} -> {local_addr}"),
+            ("", domain) => info!("MATCH {name}  {peer_addr} -> {domain} -> {local_addr}"),
+            (geo, "") => info!("MATCH {name}  {peer_addr}[{geo}] -> {local_addr}"),
+            (geo, domain) => info!("MATCH {name}  {peer_addr}[{geo}] -> {domain} -> {local_addr}"),
+        }
+
+        debug!("{peer_addr} {site}");
     }
     Ok(())
 }
@@ -194,5 +230,48 @@ fn parse_sni(buf: &[u8]) -> Result<String> {
             Ok(domain)
         }
         _ => Err(anyhow!("unexpected handshake type")),
+    }
+}
+
+async fn copy_tcp<A, B>(c: &mut A, s: &mut B)
+where
+    A: AsyncRead + AsyncWrite + Unpin + ?Sized,
+    B: AsyncRead + AsyncWrite + Unpin + ?Sized,
+{
+    let mut buf1 = [0u8; 16384];
+    let mut buf2 = [0u8; 16384];
+    loop {
+        select! {
+            a = s.read(&mut buf1) => {
+                let size = match a{
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+
+                if size == 0 {
+                    break;
+                }
+
+                match c.write_all(&buf1[..size]).await{
+                    Ok(_) => {},
+                    Err(_) => break,
+                };
+            },
+            b = c.read(&mut buf2) => {
+                let size = match b{
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+
+                if size == 0 {
+                    break;
+                }
+
+                match s.write_all(&buf2[..size]).await{
+                    Ok(_) => {},
+                    Err(_) => break,
+                };
+            }
+        }
     }
 }
