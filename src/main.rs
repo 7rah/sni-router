@@ -8,6 +8,7 @@ use sni_router::Ipdb;
 use std::fs::File;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::os::unix::prelude::AsRawFd;
 use std::str;
 use std::sync::Arc;
 use tls_parser::TlsMessage::Handshake;
@@ -15,7 +16,7 @@ use tls_parser::TlsMessageHandshake::ClientHello;
 use tls_parser::{parse_tls_extensions, parse_tls_plaintext, TlsExtension};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::{select, spawn};
+use tokio::{io, spawn, try_join};
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -168,7 +169,7 @@ async fn serve(mut inbound: TcpStream) -> Result<()> {
         let peer_addr = mapped_addr_to_ipv4_addr(inbound.peer_addr()?);
         let local_addr = mapped_addr_to_ipv4_addr(inbound.local_addr()?);
 
-        spawn(async move { copy_tcp(&mut inbound, &mut outbound).await });
+        spawn(async move { relay(&mut inbound, &mut outbound).await });
 
         let name = &outbound_config.name;
 
@@ -182,14 +183,16 @@ async fn serve(mut inbound: TcpStream) -> Result<()> {
                 .map_or("".to_string(), |(geo1, geo2)| -> String {
                     geo1 + " " + &geo2
                 })
-                .replace("\t", " "),
+                .replace('\t', " "),
         };
 
         match (geo.as_str(), domain.as_str()) {
             ("", "") => info!("MATCH {name}  {peer_addr} <-> {local_addr}"),
             ("", domain) => info!("MATCH {name}  {peer_addr} <-> {domain} <-> {local_addr}"),
             (geo, "") => info!("MATCH {name}  {peer_addr} [{geo}] <-> {local_addr}"),
-            (geo, domain) => info!("MATCH {name}  {peer_addr} [{geo}] <-> {domain} <-> {local_addr}"),
+            (geo, domain) => {
+                info!("MATCH {name}  {peer_addr} [{geo}] <-> {domain} <-> {local_addr}")
+            }
         }
     }
     Ok(())
@@ -221,45 +224,121 @@ fn parse_sni(buf: &[u8]) -> Result<String> {
     }
 }
 
-async fn copy_tcp<A, B>(c: &mut A, s: &mut B)
+async fn relay(inbound: &mut TcpStream, outbound: &mut TcpStream) -> io::Result<()> {
+    inbound.set_nodelay(true)?;
+    outbound.set_nodelay(true)?;
+    let (mut ri, mut wi) = inbound.split();
+    let (mut ro, mut wo) = outbound.split();
+
+    let client_to_server = async {
+        zero_copy(&mut ri, &mut wo).await?;
+        wo.shutdown().await
+    };
+
+    let server_to_client = async {
+        zero_copy(&mut ro, &mut wi).await?;
+        wi.shutdown().await
+    };
+
+    try_join!(client_to_server, server_to_client)?;
+
+    Ok(())
+}
+
+pub async fn zero_copy<X, Y, R, W>(mut r: R, mut w: W) -> io::Result<()>
 where
-    A: AsyncRead + AsyncWrite + Unpin + ?Sized,
-    B: AsyncRead + AsyncWrite + Unpin + ?Sized,
+    X: AsRawFd,
+    Y: AsRawFd,
+    R: AsyncRead + AsRef<X> + Unpin,
+    W: AsyncWrite + AsRef<Y> + Unpin,
 {
-    let mut buf1 = [0u8; 16384];
-    let mut buf2 = [0u8; 16384];
-    loop {
-        select! {
-            a = s.read(&mut buf1) => {
-                let size = match a{
-                    Ok(p) => p,
-                    Err(_) => break,
-                };
+    // create pipe
+    let pipe = Pipe::create()?;
+    let (rpipe, wpipe) = (pipe.0, pipe.1);
+    // get raw fd
+    let rfd = r.as_ref().as_raw_fd();
+    let wfd = w.as_ref().as_raw_fd();
+    let mut n: usize = 0;
+    let mut done = false;
 
-                if size == 0 {
+    'LOOP: loop {
+        // read until the socket buffer is empty
+        // or the pipe is filled
+        // clear readiness (EPOLLIN)
+        r.read(&mut [0u8; 0]).await?;
+        while n < PIPE_BUF_SIZE {
+            match splice_n(rfd, wpipe, PIPE_BUF_SIZE - n) {
+                x if x > 0 => n += x as usize,
+                x if x == 0 => {
+                    done = true;
                     break;
                 }
-
-                match c.write_all(&buf1[..size]).await{
-                    Ok(_) => {},
-                    Err(_) => break,
-                };
-            },
-            b = c.read(&mut buf2) => {
-                let size = match b{
-                    Ok(p) => p,
-                    Err(_) => break,
-                };
-
-                if size == 0 {
-                    break;
-                }
-
-                match s.write_all(&buf2[..size]).await{
-                    Ok(_) => {},
-                    Err(_) => break,
-                };
+                x if x < 0 && is_wouldblock() => break,
+                _ => break 'LOOP,
             }
         }
+        // write until the pipe is empty
+        while n > 0 {
+            // clear readiness (EPOLLOUT)
+            w.write(&[0u8; 0]).await?;
+            match splice_n(rpipe, wfd, n) {
+                x if x > 0 => n -= x as usize,
+                x if x < 0 && is_wouldblock() => {}
+                _ => break 'LOOP,
+            }
+        }
+        // complete
+        if done {
+            break;
+        }
+    }
+
+    w.shutdown().await?;
+    Ok(())
+}
+
+pub struct Pipe(i32, i32);
+
+impl Pipe {
+    pub fn create() -> io::Result<Self> {
+        use libc::{c_int, O_NONBLOCK};
+        let mut pipes = std::mem::MaybeUninit::<[c_int; 2]>::uninit();
+        unsafe {
+            if libc::pipe2(pipes.as_mut_ptr() as *mut c_int, O_NONBLOCK) < 0 {
+                return Err(io::Error::new(io::ErrorKind::Other, "failed to call pipe"));
+            }
+            Ok(Pipe(pipes.assume_init()[0], pipes.assume_init()[1]))
+        }
+    }
+}
+
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.0);
+            libc::close(self.1);
+        }
+    }
+}
+
+const PIPE_BUF_SIZE: usize = 0x10000;
+
+pub fn is_wouldblock() -> bool {
+    use libc::{EAGAIN, EWOULDBLOCK};
+    let errno = unsafe { *libc::__errno_location() };
+    errno == EWOULDBLOCK || errno == EAGAIN
+}
+
+fn splice_n(r: i32, w: i32, n: usize) -> isize {
+    use libc::{loff_t, SPLICE_F_MOVE, SPLICE_F_NONBLOCK};
+    unsafe {
+        libc::splice(
+            r,
+            std::ptr::null_mut::<loff_t>(),
+            w,
+            std::ptr::null_mut::<loff_t>(),
+            n,
+            SPLICE_F_MOVE | SPLICE_F_NONBLOCK,
+        )
     }
 }

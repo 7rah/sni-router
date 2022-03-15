@@ -17,12 +17,11 @@ regex = "1"
 simplelog = { version = "0.11", features = ["paris"] }
 log = "0.4"
 moka = { version = "0.7", features = ["future"] }
-dnsclientx = {version = "0.4.0",features = ['tokio-async']}
 qqwry = {git = "https://github.com/sybblow/rust-qqwry.git"}
 lazy_static = "1"
 memmap2 = "0.5"
 binread = {version = "2",features = ["const_generics"]}
-
+libc = "*"
 
 
 [profile.release]
