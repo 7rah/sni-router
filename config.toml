@@ -1,15 +1,14 @@
 [[sni]]
 name = "shadowsocks"
 inbound = ["www.bing.com","/*.cdndeliver.com"]
-outbound = "shadowsocks:443"
+outbound = "baidu.com:443"
 
 #default outbound
 [[sni]]
 name = "caddy"
 inbound = ["/*"]
-outbound = "caddy:443"
+outbound = "baidu.com:443"
 
 [global]
-qqwry = "czipdata.dat"
+qqwry = "qqwry.dat"
 ipdb_v6 = "ipv6wry.db"
-ipdb_v4 = "czipdata.dat"

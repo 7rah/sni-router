@@ -1,11 +1,10 @@
 use anyhow::{anyhow, Result};
-use dnsclientx::DNSClient;
-use ipdb::Reader;
 use moka::future::Cache;
 use qqwry::QQWryData;
 use regex::Regex;
 use serde_derive::Deserialize;
 use simplelog::{error, info, warn, *};
+use sni_router::Ipdb;
 use std::fs::File;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -108,23 +107,15 @@ fn init_config() -> Config {
 
 lazy_static::lazy_static! {
     static ref DB:Arc<Db> = Arc::new(Db::init_from_config(init_config()));
-    static ref DNS:Arc<DNSClient> = {
-        let p = |s: &str| s.parse().unwrap();
-        let dns = DNSClient::new(vec![
-            p("1.1.1.1:53"),
-            p("8.8.8.8:53"),
-            p("114.114.114.114:53"),
-        ]);
-        Arc::new(dns)
-    };
     static ref QQWRY:Arc<QQWryData> = {
         let config = init_config();
         let wry = QQWryData::new(config.global.qqwry).unwrap();
         Arc::new(wry)
     };
-    static ref IPDB_V6:Reader = {
+    static ref IPDB_V6:Ipdb = {
         let config = init_config();
-        Reader::open_file(config.global.ipdb_v6).unwrap()
+
+        Ipdb::new(config.global.ipdb_v6)
     };
 }
 
@@ -181,18 +172,14 @@ async fn serve(mut inbound: TcpStream) -> Result<()> {
         spawn(async move { copy_tcp(&mut inbound, &mut outbound).await });
 
         let name = &outbound_config.name;
-        let site = DNS
-            .query_ptr(peer_addr.ip())
-            .await
-            .map_or(String::from(""), |s| " ".to_string() + &s);
 
         let geo = match peer_addr.ip() {
             IpAddr::V4(v4) => QQWRY
                 .query(v4)
                 .map_or("".to_string(), |g| format!("{} {}", g.area, g.country)),
             IpAddr::V6(v6) => IPDB_V6
-                .find(&v6.to_string(), "CN")
-                .map_or("".to_string(), |v| format!("{} {} {}", v[0], v[1], v[2])),
+                .query(&IpAddr::V6(v6))
+                .map_or("".to_string(), |(geo1, geo2)| -> String { geo1 + " " +  &geo2 }),
         };
 
         match (geo.as_str(), domain.as_str()) {
@@ -201,8 +188,6 @@ async fn serve(mut inbound: TcpStream) -> Result<()> {
             (geo, "") => info!("MATCH {name}  {peer_addr}[{geo}] -> {local_addr}"),
             (geo, domain) => info!("MATCH {name}  {peer_addr}[{geo}] -> {domain} -> {local_addr}"),
         }
-
-        debug!("{peer_addr} {site}");
     }
     Ok(())
 }
