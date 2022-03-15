@@ -114,7 +114,6 @@ lazy_static::lazy_static! {
     };
     static ref IPDB_V6:Ipdb = {
         let config = init_config();
-
         Ipdb::new(config.global.ipdb_v6)
     };
 }
@@ -176,17 +175,21 @@ async fn serve(mut inbound: TcpStream) -> Result<()> {
         let geo = match peer_addr.ip() {
             IpAddr::V4(v4) => QQWRY
                 .query(v4)
-                .map_or("".to_string(), |g| format!("{} {}", g.area, g.country)),
+                .map_or("".to_string(), |g| format!("{} {}", g.area, g.country))
+                .replace(" CZ88.NET ", ""),
             IpAddr::V6(v6) => IPDB_V6
                 .query(&IpAddr::V6(v6))
-                .map_or("".to_string(), |(geo1, geo2)| -> String { geo1 + " " +  &geo2 }),
+                .map_or("".to_string(), |(geo1, geo2)| -> String {
+                    geo1 + " " + &geo2
+                })
+                .replace("\t", " "),
         };
 
         match (geo.as_str(), domain.as_str()) {
             ("", "") => info!("MATCH {name}  {peer_addr} -> {local_addr}"),
             ("", domain) => info!("MATCH {name}  {peer_addr} -> {domain} -> {local_addr}"),
-            (geo, "") => info!("MATCH {name}  {peer_addr}[{geo}] -> {local_addr}"),
-            (geo, domain) => info!("MATCH {name}  {peer_addr}[{geo}] -> {domain} -> {local_addr}"),
+            (geo, "") => info!("MATCH {name}  {peer_addr} [{geo}] -> {local_addr}"),
+            (geo, domain) => info!("MATCH {name}  {peer_addr} [{geo}] -> {domain} -> {local_addr}"),
         }
     }
     Ok(())
