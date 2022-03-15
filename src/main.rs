@@ -186,10 +186,10 @@ async fn serve(mut inbound: TcpStream) -> Result<()> {
         };
 
         match (geo.as_str(), domain.as_str()) {
-            ("", "") => info!("MATCH {name}  {peer_addr} -> {local_addr}"),
-            ("", domain) => info!("MATCH {name}  {peer_addr} -> {domain} -> {local_addr}"),
-            (geo, "") => info!("MATCH {name}  {peer_addr} [{geo}] -> {local_addr}"),
-            (geo, domain) => info!("MATCH {name}  {peer_addr} [{geo}] -> {domain} -> {local_addr}"),
+            ("", "") => info!("MATCH {name}  {peer_addr} <-> {local_addr}"),
+            ("", domain) => info!("MATCH {name}  {peer_addr} <-> {domain} <-> {local_addr}"),
+            (geo, "") => info!("MATCH {name}  {peer_addr} [{geo}] <-> {local_addr}"),
+            (geo, domain) => info!("MATCH {name}  {peer_addr} [{geo}] <-> {domain} <-> {local_addr}"),
         }
     }
     Ok(())
